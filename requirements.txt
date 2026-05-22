@@ -1,0 +1,7 @@
+# Runtime dependencies for HuggingFace Space deployment
+# These are the packages required to run the Gradio forecasting demo app
+torch>=2.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+gradio>=4.0.0
