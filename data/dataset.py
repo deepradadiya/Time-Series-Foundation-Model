@@ -18,6 +18,7 @@ Related modules:
 """
 
 import logging
+import math
 from typing import Iterator
 
 import numpy as np
@@ -301,3 +302,181 @@ class MultiDomainDataLoader:
             Number of batches per domain per epoch.
         """
         return self._min_batches
+
+
+class DomainMixedDataLoader:
+    """Weighted domain sampling with configurable ratios.
+
+    This loader produces batches containing samples from all three domains
+    (Energy, Weather, Finance) with controlled proportions. Unlike the
+    round-robin MultiDomainDataLoader, this class mixes samples from all
+    domains within a single batch according to configurable weight ratios.
+
+    Each batch contains (input_tensor, domain_labels) where:
+      - input_tensor: shape (batch_size, context_length) — concatenated samples
+        from all domains in the batch.
+      - domain_labels: shape (batch_size,) — integer tensor with 0=Energy,
+        1=Weather, 2=Finance indicating the domain of each sample.
+
+    When a domain's samples are exhausted within an epoch, the loader resamples
+    from that domain with replacement to maintain the target ratio. Samples
+    within each domain are shuffled independently at the start of each epoch.
+
+    Attributes:
+        datasets: List of TimeSeriesDataset instances (one per domain).
+        domain_weights: Dict mapping domain name to sampling weight.
+        batch_size: Total number of samples per batch across all domains.
+        domain_names: List of domain name strings.
+    """
+
+    def __init__(
+        self,
+        datasets: list[TimeSeriesDataset],
+        domain_weights: dict[str, float],
+        batch_size: int = 32,
+        domain_names: list[str] | None = None,
+    ) -> None:
+        """Initialize the weighted domain mixed data loader.
+
+        Parameters:
+            datasets: A list of TimeSeriesDataset instances, one for each domain
+                      (e.g., [energy_dataset, weather_dataset, finance_dataset]).
+            domain_weights: Dict mapping domain name to its sampling weight.
+                            Weights should sum to 1.0 (e.g., {"energy": 0.4,
+                            "weather": 0.3, "finance": 0.3}).
+            batch_size: Total number of samples per batch across all domains.
+                        Defaults to 32.
+            domain_names: Optional list of domain name strings. If None, defaults
+                          to ["energy", "weather", "finance"].
+
+        Raises:
+            ValueError: If any domain dataset contains zero samples.
+        """
+        if domain_names is None:
+            domain_names = ["energy", "weather", "finance"]
+
+        self.datasets = datasets
+        self.domain_weights = domain_weights
+        self.batch_size = batch_size
+        self.domain_names = domain_names
+
+        # Validate that no domain dataset is empty
+        for i, dataset in enumerate(datasets):
+            if len(dataset) == 0:
+                domain_name = domain_names[i] if i < len(domain_names) else f"domain_{i}"
+                raise ValueError(
+                    f"Domain '{domain_name}' has zero samples. All domain "
+                    f"datasets must contain at least one sample."
+                )
+
+        # Compute per-domain sample counts for each batch based on weights
+        self._domain_counts = self._compute_domain_counts()
+
+        # Compute total number of batches per epoch based on the largest domain
+        # relative to its per-batch count
+        max_batches = 0
+        for i, dataset in enumerate(datasets):
+            domain_batches = math.ceil(len(dataset) / self._domain_counts[i])
+            max_batches = max(max_batches, domain_batches)
+        self._num_batches = max_batches
+
+        logger.info(
+            "DomainMixedDataLoader: batch_size=%d, per-domain counts=%s, "
+            "batches_per_epoch=%d",
+            batch_size,
+            {name: count for name, count in zip(domain_names, self._domain_counts)},
+            self._num_batches,
+        )
+
+    def _compute_domain_counts(self) -> list[int]:
+        """Compute per-domain sample counts for each batch.
+
+        Rounds each domain's proportion to the nearest integer. If the sum
+        doesn't equal batch_size due to rounding, assigns the remainder to
+        the highest-weighted domain.
+
+        Returns:
+            List of integer counts, one per domain, summing to batch_size.
+        """
+        # Get weights in domain_names order
+        weights = []
+        for name in self.domain_names:
+            weights.append(self.domain_weights.get(name, 0.0))
+
+        # Compute raw counts and round to nearest integer
+        raw_counts = [w * self.batch_size for w in weights]
+        counts = [round(c) for c in raw_counts]
+
+        # Fix any rounding discrepancy by adjusting the highest-weighted domain
+        remainder = self.batch_size - sum(counts)
+        if remainder != 0:
+            # Find the index of the highest-weighted domain
+            max_weight_idx = weights.index(max(weights))
+            counts[max_weight_idx] += remainder
+
+        return counts
+
+    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        """Iterate over mixed-domain batches for one epoch.
+
+        At the start of each epoch, samples within each domain are shuffled
+        independently. When a domain is exhausted, it is resampled with
+        replacement to maintain the target ratio.
+
+        Yields:
+            Tuples of (input_tensor, domain_labels) where:
+              - input_tensor: shape (batch_size, context_length)
+              - domain_labels: shape (batch_size,) with integer domain indices
+        """
+        # Create shuffled index arrays for each domain
+        domain_indices = []
+        for dataset in self.datasets:
+            perm = torch.randperm(len(dataset)).tolist()
+            domain_indices.append(perm)
+
+        # Track current position within each domain's shuffled indices
+        domain_positions = [0] * len(self.datasets)
+
+        for _ in range(self._num_batches):
+            batch_inputs = []
+            batch_labels = []
+
+            for domain_idx, (dataset, count) in enumerate(
+                zip(self.datasets, self._domain_counts)
+            ):
+                indices = domain_indices[domain_idx]
+                pos = domain_positions[domain_idx]
+
+                for _ in range(count):
+                    if pos >= len(indices):
+                        # Domain exhausted — resample with replacement
+                        sample_idx = torch.randint(0, len(dataset), (1,)).item()
+                    else:
+                        sample_idx = indices[pos]
+                        pos += 1
+
+                    # Get the context window (first element of the tuple)
+                    context, _ = dataset[sample_idx]
+                    batch_inputs.append(context)
+                    batch_labels.append(domain_idx)
+
+                domain_positions[domain_idx] = pos
+
+            # Stack into tensors
+            input_tensor = torch.stack(batch_inputs, dim=0)
+            domain_labels = torch.tensor(batch_labels, dtype=torch.long)
+
+            # Shuffle the batch so domains are interleaved randomly
+            shuffle_perm = torch.randperm(input_tensor.size(0))
+            input_tensor = input_tensor[shuffle_perm]
+            domain_labels = domain_labels[shuffle_perm]
+
+            yield input_tensor, domain_labels
+
+    def __len__(self) -> int:
+        """Return the number of batches per epoch.
+
+        Returns:
+            Total number of batches yielded in one full epoch iteration.
+        """
+        return self._num_batches

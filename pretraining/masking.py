@@ -43,8 +43,9 @@ class PatchMasker(nn.Module):
     Example:
         >>> masker = PatchMasker(mask_ratio=0.4, d_model=256)
         >>> embeddings = torch.randn(4, 63, 256)  # batch=4, 63 patches, dim=256
-        >>> masked_embeddings, mask_indices = masker.mask_patches(embeddings)
-        >>> masked_embeddings.shape  # (4, 63, 256) — same shape, some patches replaced
+        >>> masked_input, original_patches, mask_indices = masker.mask_patches(embeddings)
+        >>> masked_input.shape       # (4, 63, 256) — same shape, some patches replaced
+        >>> original_patches.shape   # (4, 63, 256) — cloned copy of input before masking
         >>> mask_indices.shape       # (4, 25) — 25 masked positions per sample (40% of 63)
     """
 
@@ -89,14 +90,15 @@ class PatchMasker(nn.Module):
 
     def mask_patches(
         self, patch_embeddings: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Apply random masking to a batch of patch embeddings.
 
         For each sample in the batch, this method:
         1. Computes the number of patches to mask: round(mask_ratio * num_patches)
-        2. Randomly selects that many patch positions (uniform, without replacement)
-        3. Replaces the selected patch embeddings with the learnable mask token
-        4. Returns the masked embeddings and the indices of masked positions
+        2. Captures a cloned, detached copy of the input as original_patches
+        3. Randomly selects that many patch positions (uniform, without replacement)
+        4. Replaces the selected patch embeddings with the learnable mask token
+        5. Returns the masked input, original patches, and indices of masked positions
 
         The masking is performed independently for each sample — different samples
         in the same batch will have different patches masked. This provides diverse
@@ -109,13 +111,16 @@ class PatchMasker(nn.Module):
                 added.
 
         Returns:
-            A tuple of two tensors:
-            - masked_embeddings: Tensor of shape (batch_size, num_patches, d_model)
+            A tuple of three tensors:
+            - masked_input: Tensor of shape (batch_size, num_patches, d_model)
                 where selected patches have been replaced with the mask token.
                 Unmasked patches remain unchanged.
+            - original_patches: Tensor of shape (batch_size, num_patches, d_model)
+                a cloned, detached copy of the input captured before masking.
+                Shares no memory with masked_input and has requires_grad=False.
             - mask_indices: Tensor of shape (batch_size, num_masked) containing the
-                integer indices of the masked patch positions for each sample.
-                num_masked = round(mask_ratio * num_patches).
+                integer indices (sorted ascending) of the masked patch positions
+                for each sample. num_masked = round(mask_ratio * num_patches).
         """
         # Extract dimensions from the input tensor
         batch_size, num_patches, d_model = patch_embeddings.shape
@@ -129,14 +134,31 @@ class PatchMasker(nn.Module):
         num_masked = round(self.mask_ratio * num_patches)
 
         # -----------------------------------------------------------------------
-        # Step 2: Clone the input embeddings to avoid modifying the original tensor
-        # We need to preserve the original embeddings for computing the
-        # reconstruction loss later (comparing predictions against true values).
+        # Step 2: Capture original patches before any masking is applied
+        # clone().detach() ensures original_patches shares no memory with the
+        # input or masked_input, and is excluded from the computation graph
+        # (no gradient flows through it). This is used as the reconstruction target.
         # -----------------------------------------------------------------------
-        masked_embeddings = patch_embeddings.clone()
+        original_patches = patch_embeddings.clone().detach()
 
         # -----------------------------------------------------------------------
-        # Step 3: Generate random mask indices for each sample in the batch
+        # Edge case: If mask_ratio results in 0 patches to mask, return input
+        # unchanged with an empty mask_indices tensor of shape (batch_size, 0).
+        # -----------------------------------------------------------------------
+        if num_masked == 0:
+            mask_indices = torch.zeros(
+                batch_size, 0, dtype=torch.long, device=patch_embeddings.device
+            )
+            return patch_embeddings, original_patches, mask_indices
+
+        # -----------------------------------------------------------------------
+        # Step 3: Clone the input embeddings to create masked_input
+        # We clone so that the original patch_embeddings tensor is not modified.
+        # -----------------------------------------------------------------------
+        masked_input = patch_embeddings.clone()
+
+        # -----------------------------------------------------------------------
+        # Step 4: Generate random mask indices for each sample in the batch
         # For each sample, we randomly select num_masked positions from the
         # range [0, num_patches) without replacement. This is done using
         # torch.randperm to generate a random permutation of all patch indices,
@@ -153,8 +175,8 @@ class PatchMasker(nn.Module):
             perm = torch.randperm(num_patches, device=patch_embeddings.device)
             selected_indices = perm[:num_masked]
 
-            # Sort the selected indices for consistent ordering (optional but helps
-            # with debugging and reproducibility of mask patterns)
+            # Sort the selected indices for consistent ordering (helps with
+            # debugging and reproducibility of mask patterns)
             selected_indices, _ = torch.sort(selected_indices)
 
             mask_indices_list.append(selected_indices)
@@ -164,8 +186,8 @@ class PatchMasker(nn.Module):
         mask_indices = torch.stack(mask_indices_list, dim=0)
 
         # -----------------------------------------------------------------------
-        # Step 4: Replace masked positions with the learnable mask token
-        # For each sample, we index into the masked_embeddings tensor at the
+        # Step 5: Replace masked positions with the learnable mask token
+        # For each sample, we index into the masked_input tensor at the
         # selected positions and overwrite those patch vectors with the shared
         # mask token. The mask token is broadcast across all masked positions.
         # -----------------------------------------------------------------------
@@ -173,6 +195,6 @@ class PatchMasker(nn.Module):
             # Replace each masked patch embedding with the mask token
             # mask_indices[i] has shape (num_masked,) — indices of patches to mask
             # self.mask_token has shape (d_model,) — broadcast to fill each position
-            masked_embeddings[i, mask_indices[i], :] = self.mask_token
+            masked_input[i, mask_indices[i], :] = self.mask_token
 
-        return masked_embeddings, mask_indices
+        return masked_input, original_patches, mask_indices

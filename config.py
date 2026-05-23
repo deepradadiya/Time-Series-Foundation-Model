@@ -142,3 +142,45 @@ class Config:
 
     # Initial delay in seconds for exponential backoff (doubles each retry)
     RETRY_BASE_DELAY: float = 2.0
+
+    # -------------------------------------------------------------------------
+    # Enhanced Pretraining Parameters
+    # Settings for multi-task pretraining with domain classification,
+    # step-based logging/checkpointing, early stopping, and model export.
+    # -------------------------------------------------------------------------
+
+    # Per-domain sampling weights for DomainMixedDataLoader (must sum to 1.0)
+    DOMAIN_WEIGHTS: dict = {"energy": 0.4, "weather": 0.3, "finance": 0.3}
+
+    # Weight applied to domain classification loss in multi-task total loss
+    DOMAIN_LOSS_WEIGHT: float = 0.1
+
+    # Number of pretraining domains (Energy, Weather, Finance)
+    NUM_DOMAINS: int = 3
+
+    # Log metrics to W&B (or stdout fallback) every N optimizer steps
+    LOG_EVERY_N_STEPS: int = 50
+
+    # Save a checkpoint every N optimizer steps
+    CHECKPOINT_EVERY_N_STEPS: int = 500
+
+    # Maximum number of checkpoint files to retain (oldest deleted first)
+    MAX_CHECKPOINTS: int = 5
+
+    # Number of epochs without improvement before early stopping triggers
+    EARLY_STOPPING_PATIENCE: int = 5
+
+    # Minimum validation loss decrease to qualify as improvement
+    EARLY_STOPPING_MIN_DELTA: float = 1e-4
+
+    # Weights & Biases project name for logging
+    WANDB_PROJECT: str = "time-series-foundation-model"
+
+    # HuggingFace Hub repository name for model export
+    HF_REPO_NAME: str = "patchtst-foundation-pretrained"
+
+    # Local directory for checkpoint storage
+    CHECKPOINT_DIR: str = "checkpoints"
+
+    # Google Drive directory for checkpoint storage (Colab)
+    GDRIVE_CHECKPOINT_DIR: str = "/content/drive/MyDrive/checkpoints"

@@ -162,7 +162,7 @@ def _compute_validation_loss(
             encoder_output = model(context_batch)
 
             # Apply masking to get masked embeddings and mask indices
-            masked_output, mask_indices = masker.mask_patches(encoder_output)
+            masked_output, _original_patches, mask_indices = masker.mask_patches(encoder_output)
 
             # Run masked embeddings through the encoder again is NOT needed here.
             # For validation, we compute loss on the encoder output directly:
@@ -403,7 +403,7 @@ def pretrain(
             # Step 2: Apply random masking to the encoder output
             # masked_output has mask token at selected positions
             # mask_indices tells us which positions were masked
-            masked_output, mask_indices = masker.mask_patches(encoder_output)
+            masked_output, _original_patches, mask_indices = masker.mask_patches(encoder_output)
 
             # Step 3: Run the masked output through the reconstruction head
             # This predicts the original patch values at all positions
