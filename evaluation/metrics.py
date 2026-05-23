@@ -24,8 +24,11 @@ import numpy as np
 def mae(predictions: np.ndarray, targets: np.ndarray) -> float:
     """Compute Mean Absolute Error between predictions and targets.
 
-    MAE measures the average magnitude of forecast errors without considering
-    their direction. Lower values indicate better forecast accuracy.
+    Formula: MAE = (1/N) * Σ|predictions_i - targets_i|
+    Plain language: Average of the absolute differences between predicted and
+    actual values. Measures typical forecast error magnitude without regard to
+    direction. Always >= 0; equals 0 only when predictions perfectly match targets.
+    Deterministic — identical inputs always produce identical output.
 
     Parameters
     ----------
@@ -38,12 +41,13 @@ def mae(predictions: np.ndarray, targets: np.ndarray) -> float:
     Returns
     -------
     float
-        The mean absolute error averaged over all elements.
+        The mean absolute error averaged over all elements. Always >= 0.
     """
     # Convert inputs to numpy arrays for safety (handles lists, tensors, etc.)
     predictions = np.asarray(predictions, dtype=np.float64)
     targets = np.asarray(targets, dtype=np.float64)
 
+    # MAE = mean(|predictions - targets|)
     # Compute element-wise absolute differences and take the mean
     absolute_errors = np.abs(predictions - targets)
     return float(np.mean(absolute_errors))
@@ -52,9 +56,11 @@ def mae(predictions: np.ndarray, targets: np.ndarray) -> float:
 def mse(predictions: np.ndarray, targets: np.ndarray) -> float:
     """Compute Mean Squared Error between predictions and targets.
 
-    MSE penalizes larger errors more heavily than MAE due to squaring.
-    It is always non-negative and equals zero only when predictions
-    perfectly match targets.
+    Formula: MSE = (1/N) * Σ(predictions_i - targets_i)²
+    Plain language: Average of the squared differences between predicted and
+    actual values. Penalizes larger errors more heavily than MAE due to squaring.
+    Always >= 0; equals 0 only when predictions perfectly match targets.
+    Deterministic — identical inputs always produce identical output.
 
     Parameters
     ----------
@@ -67,12 +73,13 @@ def mse(predictions: np.ndarray, targets: np.ndarray) -> float:
     Returns
     -------
     float
-        The mean squared error averaged over all elements.
+        The mean squared error averaged over all elements. Always >= 0.
     """
     # Convert inputs to numpy arrays for consistent computation
     predictions = np.asarray(predictions, dtype=np.float64)
     targets = np.asarray(targets, dtype=np.float64)
 
+    # MSE = mean((predictions - targets)²)
     # Square the differences and average across all forecast positions
     squared_errors = (predictions - targets) ** 2
     return float(np.mean(squared_errors))
@@ -85,14 +92,16 @@ def mase(
 ) -> float:
     """Compute Mean Absolute Scaled Error using a seasonal naive baseline.
 
-    MASE scales the MAE by the in-sample MAE of a seasonal naive forecast.
-    A MASE < 1 means the model outperforms the seasonal naive baseline;
-    MASE > 1 means it performs worse. The seasonal period defaults to 24
-    (hourly data with daily seasonality, matching ETTh1).
+    Formula: MASE = MAE(predictions, targets) / naive_MAE
+             where naive_MAE = mean(|y_t - y_{t-m}|) for t = m, ..., T-1
+             and m = seasonal_period (default 24 for hourly/daily seasonality).
+    Plain language: Ratio of the model's MAE to the MAE of a seasonal naive
+    forecast. A MASE < 1 means the model outperforms the seasonal naive baseline;
+    MASE > 1 means it performs worse. Returns float("inf") when the naive baseline
+    MAE is zero (perfectly periodic series). Deterministic.
 
-    The scaling denominator is:
-        mean(|y_t - y_{t - seasonal_period}|) for t = seasonal_period, ..., T-1
-    computed over the target array itself (the test portion).
+    The seasonal period defaults to 24 (hourly data with daily seasonality,
+    matching ETTh1).
 
     Parameters
     ----------
@@ -108,26 +117,28 @@ def mase(
     Returns
     -------
     float
-        The MASE value. Returns inf if the naive baseline error is zero
+        The MASE value. Returns float("inf") if the naive baseline MAE is zero
         (constant series with exact seasonal repetition).
     """
     # Flatten arrays so we can compute the seasonal naive error sequentially
     predictions = np.asarray(predictions, dtype=np.float64).flatten()
     targets = np.asarray(targets, dtype=np.float64).flatten()
 
-    # Compute the numerator: MAE of the model's predictions
+    # Numerator: MAE of the model's predictions = mean(|pred - target|)
     numerator = np.mean(np.abs(predictions - targets))
 
-    # Compute the denominator: MAE of the seasonal naive forecast on targets
+    # Denominator (naive_MAE): MAE of the seasonal naive forecast on targets
     # The seasonal naive forecast at time t is simply the value at t - seasonal_period
+    # naive_MAE = mean(|y_t - y_{t-seasonal_period}|) for t = seasonal_period..T-1
     naive_errors = np.abs(targets[seasonal_period:] - targets[:-seasonal_period])
 
-    # Guard against division by zero (happens if the series is perfectly periodic)
+    # Guard against division by zero — return inf when naive baseline MAE is zero
+    # (happens if the series is perfectly periodic with period = seasonal_period)
     denominator = np.mean(naive_errors)
     if denominator == 0.0:
         return float("inf")
 
-    # MASE is the ratio of model error to naive baseline error
+    # MASE = MAE / naive_MAE
     return float(numerator / denominator)
 
 
@@ -138,18 +149,16 @@ def crps_quantile(
 ) -> float:
     """Compute CRPS approximated from quantile forecasts.
 
-    The Continuous Ranked Probability Score is a proper scoring rule for
-    probabilistic forecasts. When only discrete quantiles are available
-    (e.g., P10, P50, P90), CRPS can be approximated using the quantile
-    score (pinball loss) averaged across all quantile levels:
+    Formula: CRPS ≈ (2/K) * Σ_{k=1}^{K} mean(pinball_loss(q_k, y, τ_k))
+             where K = number of quantiles (default 3 for P10/P50/P90),
+             and pinball_loss(q, y, τ) = τ * max(y - q, 0) + (1 - τ) * max(q - y, 0)
+    Plain language: A proper scoring rule for probabilistic forecasts. Measures how
+    well the predicted quantiles (P10, P50, P90) capture the true distribution of
+    outcomes. Lower CRPS indicates better-calibrated prediction intervals. The factor
+    of (2/K) scales the sum of pinball losses to approximate the full CRPS integral.
+    Deterministic — identical inputs always produce identical output.
 
-        CRPS ≈ (2 / K) * Σ_k pinball_loss(q_k, y, tau_k)
-
-    where K is the number of quantiles, q_k is the predicted quantile value,
-    y is the actual value, and tau_k is the quantile level.
-
-    The pinball (quantile) loss for a single quantile level tau is:
-        L(q, y, tau) = tau * max(y - q, 0) + (1 - tau) * max(q - y, 0)
+    Default quantile levels: [0.1, 0.5, 0.9] (P10/P50/P90).
 
     Parameters
     ----------
@@ -175,32 +184,35 @@ def crps_quantile(
     q_predictions = np.asarray(q_predictions, dtype=np.float64)
     targets = np.asarray(targets, dtype=np.float64)
 
-    # Number of quantile levels used in the approximation
+    # K = number of quantile levels used in the approximation
     num_quantiles = len(quantiles)
 
-    # Accumulate pinball loss across all quantile levels
+    # Accumulate pinball loss across all K quantile levels
+    # CRPS ≈ (2/K) * Σ_{k=1}^{K} mean(pinball_loss_k)
     total_pinball = 0.0
 
     for i, tau in enumerate(quantiles):
-        # Extract predictions for this quantile level (last axis index i)
+        # Extract predictions for quantile level τ_k (last axis index i)
         q_hat = q_predictions[..., i]
 
-        # Compute the residual: actual minus predicted
+        # Compute the residual: actual minus predicted (y - q_hat)
         residual = targets - q_hat
 
-        # Pinball loss: tau * max(residual, 0) + (1 - tau) * max(-residual, 0)
-        # This penalizes under-prediction by tau and over-prediction by (1 - tau)
+        # Pinball (quantile) loss for level τ:
+        #   L(q, y, τ) = τ * max(y - q, 0) + (1 - τ) * max(q - y, 0)
+        # Penalizes under-prediction (y > q) by factor τ,
+        # and over-prediction (q > y) by factor (1 - τ)
         pinball = np.where(
             residual >= 0,
-            tau * residual,
-            (tau - 1.0) * residual,
+            tau * residual,          # under-prediction penalty
+            (tau - 1.0) * residual,  # over-prediction penalty (equivalent to (1-τ)*(q-y))
         )
 
-        # Sum the mean pinball loss for this quantile level
+        # Add mean pinball loss for this quantile level to the running total
         total_pinball += np.mean(pinball)
 
-    # Average across quantile levels and scale by 2 for CRPS approximation
-    # The factor of 2 converts the average pinball loss to a CRPS estimate
+    # Final CRPS = (2/K) * sum of mean pinball losses across all quantile levels
+    # The factor of 2/K converts the average pinball loss to a CRPS estimate
     crps = (2.0 / num_quantiles) * total_pinball
 
     return float(crps)
